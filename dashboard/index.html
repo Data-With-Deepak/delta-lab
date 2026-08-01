@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Delta Live Flow — Order Book / OI / Trades</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0b0e11; --panel:#151a21; --panel2:#1c232c; --line:#27313c;
+    --green:#0ecb81; --red:#f6465d; --text:#eaecef; --muted:#848e9c;
+    --green-bg:rgba(14,203,129,.15); --red-bg:rgba(246,70,93,.15);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;padding:12px}
+  .topbar{display:flex;align-items:center;gap:18px;flex-wrap:wrap;background:var(--panel);
+    padding:12px 16px;border-radius:10px;margin-bottom:12px}
+  .topbar h1{font-size:15px;font-weight:600;letter-spacing:.5px}
+  .sym-input{background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    padding:6px 10px;border-radius:6px;width:120px;text-transform:uppercase;font-weight:600}
+  .stat{display:flex;flex-direction:column}
+  .stat .lbl{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+  .stat .val{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+  #status{margin-left:auto;font-size:11px;padding:4px 10px;border-radius:20px;background:var(--panel2)}
+  #status.on{color:var(--green)} #status.off{color:var(--red)}
+  .grid{display:grid;grid-template-columns:1fr 1fr 360px;gap:12px}
+  @media(max-width:1100px){.grid{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border-radius:10px;padding:14px;min-height:300px}
+  .panel h2{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;
+    display:flex;justify-content:space-between;align-items:center}
+  .tf{display:flex;gap:4px}
+  .tf button{background:var(--panel2);border:1px solid var(--line);color:var(--muted);
+    padding:3px 9px;border-radius:5px;cursor:pointer;font-size:11px}
+  .tf button.active{background:#2b3340;color:var(--text);border-color:#3a4452}
+  .chart-wrap{position:relative;height:240px}
+  /* order book */
+  .ob-head{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;
+    text-transform:uppercase;padding:0 4px 4px;border-bottom:1px solid var(--line);margin-bottom:4px}
+  .ob-rows{display:flex;flex-direction:column;gap:1px;font-variant-numeric:tabular-nums}
+  .ob-row{position:relative;display:flex;justify-content:space-between;padding:2px 6px;font-size:12px;border-radius:3px;overflow:hidden}
+  .ob-row .bar{position:absolute;top:0;bottom:0;right:0;z-index:0}
+  .ob-row.bid .bar{background:var(--green-bg)} .ob-row.ask .bar{background:var(--red-bg)}
+  .ob-row span{position:relative;z-index:1}
+  .ob-row.bid .px{color:var(--green)} .ob-row.ask .px{color:var(--red)}
+  .ob-mid{text-align:center;padding:8px;font-weight:700;font-size:15px;font-variant-numeric:tabular-nums}
+  .ob-mid .spread{font-size:10px;color:var(--muted);font-weight:400}
+  .imbalance{height:8px;border-radius:4px;display:flex;overflow:hidden;margin-top:10px}
+  .imbalance .b{background:var(--green)} .imbalance .a{background:var(--red)}
+  .imb-lbl{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:4px}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>DELTA LIVE FLOW</h1>
+    <input id="sym" class="sym-input" value="ETHUSD" />
+    <button id="go" class="tf"><span style="padding:6px 12px;background:#2b3340;border-radius:5px;cursor:pointer">Connect</span></button>
+    <div class="stat"><span class="lbl">Mark Price</span><span class="val" id="price">—</span></div>
+    <div class="stat"><span class="lbl">Open Interest (USD)</span><span class="val" id="oi">—</span></div>
+    <div class="stat"><span class="lbl">OI 6h Δ</span><span class="val" id="oichg">—</span></div>
+    <div class="stat"><span class="lbl">Funding</span><span class="val" id="funding">—</span></div>
+    <div id="status" class="off">● disconnected</div>
+  </div>
+
+  <div class="grid">
+    <!-- OPEN INTEREST -->
+    <div class="panel">
+      <h2>Open Interest
+        <span class="tf" data-group="oi">
+          <button data-w="60000">1m</button>
+          <button data-w="300000" class="active">5m</button>
+          <button data-w="900000">15m</button>
+          <button data-w="0">All</button>
+        </span>
+      </h2>
+      <div class="chart-wrap"><canvas id="oiChart"></canvas></div>
+    </div>
+
+    <!-- BUY / SELL FLOW -->
+    <div class="panel">
+      <h2>Aggressive Buy vs Sell Flow
+        <span class="tf" data-group="flow">
+          <button data-w="60000">1m</button>
+          <button data-w="300000" class="active">5m</button>
+          <button data-w="900000">15m</button>
+        </span>
+      </h2>
+      <div class="chart-wrap"><canvas id="flowChart"></canvas></div>
+    </div>
+
+    <!-- ORDER BOOK -->
+    <div class="panel">
+      <h2>Live Order Book <span id="obsym" style="color:var(--muted)"></span></h2>
+      <div class="ob-head"><span>Price</span><span>Size</span></div>
+      <div class="ob-rows" id="asks"></div>
+      <div class="ob-mid" id="mid">—<div class="spread" id="spread"></div></div>
+      <div class="ob-rows" id="bids"></div>
+      <div class="imbalance"><div class="b" id="imbB" style="width:50%"></div><div class="a" id="imbA" style="width:50%"></div></div>
+      <div class="imb-lbl"><span id="imbBl">buy 50%</span><span id="imbAl">50% sell</span></div>
+    </div>
+  </div>
+
+<script>
+const WS_URL = "wss://socket.india.delta.exchange";
+const OB_LEVELS = 12;        // order book rows per side
+const MAX_HISTORY_MS = 16*60*1000;   // keep ~16 min of raw data
+
+let symbol = "ETHUSD";
+let ws = null;
+let oiData = [];     // {t, oi}
+let tradeData = [];  // {t, side:'buy'|'sell', size}
+let book = {buy:[], sell:[]};
+let tf = { oi: 300000, flow: 300000 };
+
+const fmt = n => n>=1e9?(n/1e9).toFixed(2)+'B':n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':(+n).toFixed(0);
+const $ = id => document.getElementById(id);
+
+// ---------- charts ----------
+Chart.defaults.color = '#848e9c';
+Chart.defaults.borderColor = '#27313c';
+Chart.defaults.font.size = 10;
+
+const oiChart = new Chart($('oiChart'), {
+  type:'line',
+  data:{labels:[],datasets:[{label:'OI (USD)',data:[],borderColor:'#f0b90b',
+    backgroundColor:'rgba(240,185,11,.08)',fill:true,tension:.25,pointRadius:0,borderWidth:2}]},
+  options:{responsive:true,maintainAspectRatio:false,animation:false,
+    plugins:{legend:{display:false}},
+    scales:{y:{position:'right',ticks:{callback:v=>'$'+fmt(v)}},x:{ticks:{maxTicksLimit:6}}}}
+});
+
+const flowChart = new Chart($('flowChart'), {
+  data:{labels:[],datasets:[
+    {type:'bar',label:'Buy',data:[],backgroundColor:'rgba(14,203,129,.65)',stack:'s'},
+    {type:'bar',label:'Sell',data:[],backgroundColor:'rgba(246,70,93,.65)',stack:'s'},
+    {type:'line',label:'Cum Δ (buy-sell)',data:[],borderColor:'#eaecef',borderWidth:2,
+      pointRadius:0,tension:.2,yAxisID:'y1'}
+  ]},
+  options:{responsive:true,maintainAspectRatio:false,animation:false,
+    plugins:{legend:{labels:{boxWidth:10,font:{size:10}}}},
+    scales:{y:{position:'right',ticks:{callback:v=>fmt(Math.abs(v))}},
+      y1:{position:'left',grid:{drawOnChartArea:false},ticks:{callback:v=>fmt(v)}},
+      x:{ticks:{maxTicksLimit:6}}}}
+});
+
+// ---------- websocket ----------
+function connect(){
+  symbol = $('sym').value.trim().toUpperCase() || "ETHUSD";
+  $('obsym').textContent = symbol;
+  oiData=[]; tradeData=[]; book={buy:[],sell:[]};
+  if(ws){ try{ws.close()}catch(e){} }
+  ws = new WebSocket(WS_URL);
+  ws.onopen = ()=>{
+    setStatus(true);
+    ws.send(JSON.stringify({type:"subscribe",payload:{channels:[
+      {name:"l2_orderbook",symbols:[symbol]},
+      {name:"all_trades",symbols:[symbol]},
+      {name:"v2/ticker",symbols:[symbol]}
+    ]}}));
+  };
+  ws.onclose = ()=>{ setStatus(false); };
+  ws.onerror = ()=>{ setStatus(false); };
+  ws.onmessage = e=>handle(JSON.parse(e.data));
+}
+
+function setStatus(on){
+  const s=$('status'); s.className = on?'on':'off';
+  s.textContent = on? '● live · '+symbol : '● disconnected';
+}
+
+function handle(m){
+  const now = Date.now();
+  switch(m.type){
+    case 'l2_orderbook':
+      book.buy = (m.buy||[]).slice(0,OB_LEVELS);
+      book.sell = (m.sell||[]).slice(0,OB_LEVELS);
+      break;
+    case 'all_trades_snapshot':
+      (m.trades||[]).forEach(t=>pushTrade(t, now));
+      break;
+    case 'all_trades':
+      pushTrade(m, now);
+      break;
+    case 'v2/ticker':
+      oiData.push({t:now, oi:+m.oi_value_usd});
+      $('price').textContent = (+m.mark_price).toFixed(2);
+      $('oi').textContent = '$'+fmt(+m.oi_value_usd);
+      const chg=+m.oi_change_usd_6h;
+      $('oichg').textContent=(chg>=0?'+$':'-$')+fmt(Math.abs(chg));
+      $('oichg').style.color = chg>=0?'var(--green)':'var(--red)';
+      const fr=(+m.funding_rate*100);
+      $('funding').textContent = fr.toFixed(4)+'%';
+      $('funding').style.color = fr>=0?'var(--green)':'var(--red)';
+      break;
+  }
+  prune(now);
+}
+
+function pushTrade(t, now){
+  const side = t.buyer_role==='taker' ? 'buy' : 'sell';   // taker = aggressor
+  tradeData.push({t:now, side, size:+t.size});
+}
+
+function prune(now){
+  const cut = now - MAX_HISTORY_MS;
+  oiData = oiData.filter(d=>d.t>=cut);
+  tradeData = tradeData.filter(d=>d.t>=cut);
+}
+
+// ---------- render loop ----------
+function bucketize(data, windowMs, buckets=40){
+  const now=Date.now();
+  const start = windowMs ? now-windowMs : (data.length?data[0].t:now);
+  const span = Math.max(now-start,1);
+  const size = span/buckets;
+  const out = Array.from({length:buckets},(_,i)=>({t:start+i*size, buy:0, sell:0, oi:null}));
+  data.forEach(d=>{
+    if(d.t<start) return;
+    let i=Math.min(buckets-1, Math.floor((d.t-start)/size));
+    if(d.side){ out[i][d.side]+=d.size; }
+    else { out[i].oi = d.oi; }   // last oi in bucket wins
+  });
+  return out;
+}
+
+function render(){
+  // ---- OI chart ----
+  const ob = bucketize(oiData, tf.oi);
+  let lastOi=null;
+  const oiVals = ob.map(b=>{ if(b.oi!=null) lastOi=b.oi; return lastOi; });
+  oiChart.data.labels = ob.map(b=>tlabel(b.t));
+  oiChart.data.datasets[0].data = oiVals;
+  oiChart.update('none');
+
+  // ---- Flow chart ----
+  const fb = bucketize(tradeData, tf.flow);
+  let cum=0; const cumArr=[];
+  fb.forEach(b=>{ cum += b.buy-b.sell; cumArr.push(cum); });
+  flowChart.data.labels = fb.map(b=>tlabel(b.t));
+  flowChart.data.datasets[0].data = fb.map(b=>b.buy);
+  flowChart.data.datasets[1].data = fb.map(b=>-b.sell);
+  flowChart.data.datasets[2].data = cumArr;
+  flowChart.update('none');
+
+  // ---- Order book ----
+  renderBook();
+  requestAnimationFrame(()=>setTimeout(render, 400));
+}
+
+function tlabel(t){const d=new Date(t);return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});}
+
+function renderBook(){
+  const asks=[...book.sell].slice(0,OB_LEVELS).reverse();
+  const bids=[...book.buy].slice(0,OB_LEVELS);
+  const maxSz=Math.max(1,...asks.map(r=>+r.size),...bids.map(r=>+r.size));
+  $('asks').innerHTML = asks.map(r=>row(r,'ask',maxSz)).join('');
+  $('bids').innerHTML = bids.map(r=>row(r,'bid',maxSz)).join('');
+  if(bids[0]&&asks[asks.length-1]){
+    const bb=+bids[0].limit_price, ba=+asks[asks.length-1].limit_price;
+    $('mid').firstChild.textContent=((bb+ba)/2).toFixed(2);
+    $('spread').textContent='spread '+(ba-bb).toFixed(2)+' ('+((ba-bb)/ba*100).toFixed(3)+'%)';
+  }
+  const bSum=bids.reduce((s,r)=>s+ +r.size,0), aSum=asks.reduce((s,r)=>s+ +r.size,0);
+  const tot=bSum+aSum||1, bp=Math.round(bSum/tot*100);
+  $('imbB').style.width=bp+'%'; $('imbA').style.width=(100-bp)+'%';
+  $('imbBl').textContent='buy '+bp+'%'; $('imbAl').textContent=(100-bp)+'% sell';
+}
+function row(r,cls,maxSz){
+  const w=(+r.size/maxSz*100).toFixed(1);
+  return `<div class="ob-row ${cls}"><div class="bar" style="width:${w}%"></div>`
+    +`<span class="px">${(+r.limit_price).toFixed(2)}</span><span>${fmt(+r.size)}</span></div>`;
+}
+
+// ---------- timeframe buttons ----------
+document.querySelectorAll('.tf[data-group]').forEach(g=>{
+  g.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{
+    g.querySelectorAll('button').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    tf[g.dataset.group] = +b.dataset.w;
+  }));
+});
+$('go').addEventListener('click', connect);
+$('sym').addEventListener('keydown', e=>{ if(e.key==='Enter') connect(); });
+
+// start
+connect();
+render();
+</script>
+</body>
+</html>

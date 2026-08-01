@@ -1,0 +1,69 @@
+name: ETH alerts (delta-lab)
+
+# Runs alerts.py --once on a schedule instead of a 24/7 VM.
+# Public repo => unlimited free Actions minutes.
+# 15m-candle alerts don't need per-second polling, so every 5 min is plenty.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"     # alert check, every 5 minutes
+    - cron: "23 2 1 * *"      # monthly keepalive (prevents 60-day auto-disable)
+  workflow_dispatch:            # lets you trigger a run manually from the Actions tab
+
+# Don't let a slow run pile up on top of the next scheduled one.
+concurrency:
+  group: eth-alerts
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  alert:
+    if: github.event.schedule != '23 2 1 * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      # Restore hysteresis state from the previous run. Each save uses a unique
+      # key (run_id); restore-keys falls back to the most recent one.
+      - name: Restore alert state
+        uses: actions/cache/restore@v4
+        with:
+          path: .watch_state.json
+          key: eth-state-${{ github.run_id }}
+          restore-keys: |
+            eth-state-
+
+      - name: Run one alert cycle
+        env:
+          DELTA_ENV: prod
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python alerts.py ETHUSD --once
+
+      - name: Save alert state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .watch_state.json
+          key: eth-state-${{ github.run_id }}
+
+  # GitHub disables scheduled workflows after 60 days of no repo activity.
+  # A monthly empty commit keeps this one alive with zero babysitting.
+  keepalive:
+    if: github.event.schedule == '23 2 1 * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "keepalive: keep scheduled alerts running"
+          git push
